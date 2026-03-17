@@ -494,51 +494,50 @@ jobs:
                   log_info "内核 ${REQUIRED_KERNEL} 已在运行"
                   return 0
               fi
-            
-            log_step "安装内核 ${REQUIRED_KERNEL}..."
-            local distro=$(detect_distro)
-            
-            case $distro in
-                ubuntu|debian)
-                    if [ -d "${SCRIPT_DIR}/kernel-debs" ]; then
-                        log_info "使用本地deb包安装内核..."
-                        dp -i "${SCRIPT_DIR}/kernel-debs"/*.deb 2>/dev/null || \
-                        dp -i "${SCRIPT_DIR}/kernel-debs"/*.deb || \
-                        log_info "从本地deb包安装内核完成"
-                        update-grub
-                        return
-                    fi
-                    
-                    log_info "从apt仓库安装内核..."
-                    apt-get update
-                    apt-get install -y linux-image-${REQUIRED_KERNEL} \
-                                        linux-headers-${REQUIRED_KERNEL} \
-                                        linux-modules-${REQUIRED_KERNEL} \
-                                        linux-modules-extra-${REQUIRED_KERNEL} 2>/dev/null || \
-                    apt-get install -y linux-image-${REQUIRED_KERNEL} \
-                                        linux-headers-${REQUIRED_KERNEL}
-                    
-                    update-grub
-                    ;;
-                *)
-                    log_error "不支持的发行版: $distro"
-                    log_error "请手动安装内核 ${REQUIRED_KERNEL}"
-                    exit 1
-                    ;;
-            esac
-            
-            log_warn "内核 ${REQUIRED_KERNEL} 已安装，需要重启"
-            log_warn "重启后再次运行此脚本继续安装"
-            
-            echo ""
-            echo "========================================"
-            echo "  需要重启"
-            echo "========================================"
-            echo "运行: sudo reboot"
-            echo "重启后运行: sudo ./install.sh"
-            echo "========================================"
-            exit 0
-        }
+              
+              log_step "安装内核 ${REQUIRED_KERNEL}..."
+              local distro=$(detect_distro)
+              
+              case $distro in
+                  ubuntu|debian)
+                      if [ -d "${SCRIPT_DIR}/kernel-debs" ]; then
+                          log_info "使用本地deb包安装内核..."
+                          dpkg -i "${SCRIPT_DIR}/kernel-debs"/*.deb 2>/dev/null || true
+                          log_info "从本地deb包安装内核完成"
+                          update-grub
+                          return 0
+                      fi
+                      
+                      log_info "从apt仓库安装内核..."
+                      apt-get update
+                      apt-get install -y linux-image-${REQUIRED_KERNEL} \
+                                          linux-headers-${REQUIRED_KERNEL} \
+                                          linux-modules-${REQUIRED_KERNEL} \
+                                          linux-modules-extra-${REQUIRED_KERNEL} 2>/dev/null || \
+                      apt-get install -y linux-image-${REQUIRED_KERNEL} \
+                                          linux-headers-${REQUIRED_KERNEL}
+                      
+                      update-grub
+                      ;;
+                  *)
+                      log_error "不支持的发行版: $distro"
+                      log_error "请手动安装内核 ${REQUIRED_KERNEL}"
+                      exit 1
+                      ;;
+              esac
+              
+              log_warn "内核 ${REQUIRED_KERNEL} 已安装，需要重启"
+              log_warn "重启后再次运行此脚本继续安装"
+              
+              echo ""
+              echo "========================================"
+              echo "  需要重启"
+              echo "========================================"
+              echo "运行: sudo reboot"
+              echo "重启后运行: sudo ./install.sh"
+              echo "========================================"
+              exit 0
+          }
           
           download_driver() {
               if [ -f "${SCRIPT_DIR}/NVIDIA-Linux-x86_64-${NVIDIA_VERSION}.run" ]; then
