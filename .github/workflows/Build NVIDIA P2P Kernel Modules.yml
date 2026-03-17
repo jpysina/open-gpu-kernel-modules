@@ -160,7 +160,7 @@ jobs:
             if [ -z "$LATEST_KERNEL" ]; then
               echo "Kernel detection failed, using fallback..."
               case "${UBUNTU_VER}" in
-                "25.10") LATEST_KERNEL="6.17.0-5-generic" ;;
+                "25.10") LATEST_KERNEL="6.17.0-19-generic" ;;
                 "25.04") LATEST_KERNEL="6.14.0-15-generic" ;;
                 "24.10") LATEST_KERNEL="6.11.0-14-generic" ;;
                 "24.04") LATEST_KERNEL="6.8.0-52-generic" ;;
@@ -335,31 +335,37 @@ jobs:
         run: |
           KERNEL_VER="${{ matrix.kernel_version }}"
           VERSION="${{ env.NVIDIA_VERSION }}"
-          cd nvidia-extracted
+          cd nvidia-extracted/kernel-open
           
           echo "Building for kernel: ${KERNEL_VER}"
           
           SYSSRC="/usr/src/linux-headers-${KERNEL_VER}"
+          if [ ! -d "$SYSSRC" ]; then
+            SYSSRC="/lib/modules/${KERNEL_VER}/build"
+          fi
+          
           if [ -d "$SYSSRC" ]; then
             echo "Using kernel headers from: ${SYSSRC}"
-            make modules -j$(nproc) SYSSRC="${SYSSRC}" 2>&1 | tee build.log
+            make -j$(nproc) SYSSRC="${SYSSRC}" 2>&1 | tee build.log
             BUILD_EXIT=${PIPESTATUS[0]}
           else
-            echo "Warning: Specific kernel headers not found, trying generic..."
-            make modules -j$(nproc) 2>&1 | tee build.log
-            BUILD_EXIT=${PIPESTATUS[0]}
+            echo "ERROR: Kernel headers not found at ${SYSSRC}"
+            echo "Available kernel headers:"
+            ls -la /usr/src/ | grep linux-headers || true
+            ls -la /lib/modules/ || true
+            exit 1
           fi
           
           echo ""
           echo "Build exit code: ${BUILD_EXIT}"
           echo ""
           echo "Build artifacts:"
-          KO_COUNT=$(find kernel-open -name "*.ko" 2>/dev/null | wc -l)
+          KO_COUNT=$(find . -name "*.ko" 2>/dev/null | wc -l)
           echo "Found ${KO_COUNT} .ko files"
           
-          find kernel-open -name "*.ko" -exec ls -la {} \; 2>/dev/null || true
+          find . -name "*.ko" -exec ls -la {} \; 2>/dev/null || true
           
-          for ko in kernel-open/*.ko; do
+          for ko in *.ko; do
             if [ -f "$ko" ]; then
               echo "Module info for ${ko}:"
               modinfo "${ko}" 2>/dev/null | grep -E "vermagic|version" || true
@@ -392,6 +398,15 @@ jobs:
           
           cp kernel-open/*.ko ${PACKAGE_DIR}/ 2>/dev/null || true
           cp NVIDIA-Linux-x86_64-${VERSION}.run ${PACKAGE_DIR}/ 2>/dev/null || true
+          
+          echo "Package contents:"
+          ls -la ${PACKAGE_DIR}/
+          
+          KO_IN_PACKAGE=$(ls ${PACKAGE_DIR}/*.ko 2>/dev/null | wc -l)
+          if [ "$KO_IN_PACKAGE" -lt 3 ]; then
+            echo "ERROR: Not enough .ko files in package!"
+            exit 1
+          fi
           
           INSTALL_SCRIPT_B64=$(cat << 'SCRIPT_END' | base64 -w0
           #!/bin/bash
