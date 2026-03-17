@@ -245,7 +245,7 @@ jobs:
           ls -la /usr/src/ 2>/dev/null | grep linux-headers || true
 
       - name: Checkout repository for P2P patch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -782,7 +782,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: nvidia-p2p-${{ env.NVIDIA_VERSION }}-ubuntu${{ needs.detect-versions.outputs.ubuntu_version }}-kernel-${{ matrix.kernel_version }}
           path: nvidia-extracted/nvidia-p2p-modules-*.tar.gz
@@ -796,7 +796,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
