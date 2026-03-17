@@ -1,4 +1,4 @@
-name: Build NVIDIA P2P Kernel Modules (Auto Patch)
+name: Build NVIDIA P2P Kernel Modules
 
 on:
   schedule:
@@ -38,9 +38,9 @@ jobs:
       - name: Detect latest versions
         id: detect
         run: |
-          NVIDIA_VER="${{ github.event.inputs.nvidia_version }}"
-          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
-          UBUNTU_VER="${{ github.event.inputs.ubuntu_version || '22.04' }}"
+          NVIDIA_VER="${{ inputs.nvidia_version }}"
+          KERNEL_VER="${{ inputs.kernel_version }}"
+          UBUNTU_VER="${{ inputs.ubuntu_version || '22.04' }}"
           
           if [ -z "$NVIDIA_VER" ]; then
             echo "Detecting latest NVIDIA version..."
@@ -58,24 +58,26 @@ jobs:
           echo "nvidia_version=${NVIDIA_VER}" >> $GITHUB_OUTPUT
           echo "ubuntu_version=${UBUNTU_VER}" >> $GITHUB_OUTPUT
           
-          if [ -n "${{ github.event.inputs.build_all_kernels }}" ]; then
-            KERNELS="${{ github.event.inputs.build_all_kernels }}"
+          if [ -n "${{ inputs.build_all_kernels }}" ]; then
+            KERNELS="${{ inputs.build_all_kernels }}"
+            KERNELS=$(echo "$KERNELS" | tr ',' '\n' | jq -R . | jq -s .)
           elif [ -n "$KERNEL_VER" ]; then
-            KERNELS="${KERNEL_VER}"
+            KERNELS="[\"${KERNEL_VER}\"]"
           else
             echo "Detecting latest kernels..."
-            KERNELS=$(curl -s "http://archive.ubuntu.com/ubuntu/dists/questing-updates/main/binary-amd64/Packages.gz" 2>/dev/null | \
+            KERNEL_LIST=$(curl -s "http://archive.ubuntu.com/ubuntu/dists/questing-updates/main/binary-amd64/Packages.gz" 2>/dev/null | \
               zcat 2>/dev/null | \
               grep -A2 "^Package: linux-image-" | \
               grep -oP 'linux-image-\K[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-generic' | \
               sort -V -u | \
-              tail -5 | \
-              tr '\n' ',' | \
-              sed 's/,$//')
+              tail -5)
             
-            if [ -z "$KERNELS" ]; then
-              KERNELS="6.17.0-19-generic,6.17.0-14-generic"
+            if [ -z "$KERNEL_LIST" ]; then
+              KERNEL_LIST="6.17.0-19-generic
+          6.17.0-14-generic"
             fi
+            
+            KERNELS=$(echo "$KERNEL_LIST" | jq -R . | jq -s .)
           fi
           
           echo "Kernel versions: ${KERNELS}"
@@ -87,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kernel_version: ${{ fromJson(needs.detect-versions.outputs.kernel_versions != '' && format('["{0}"]', needs.detect-versions.outputs.kernel_versions) || '["6.17.0-19-generic"]') }}
+        kernel_version: ${{ fromJSON(needs.detect-versions.outputs.kernel_versions) }}
     container:
       image: ubuntu:${{ needs.detect-versions.outputs.ubuntu_version }}
     env:
@@ -106,7 +108,8 @@ jobs:
             cpio \
             file \
             ca-certificates \
-            patch
+            patch \
+            jq
 
       - name: Install kernel headers
         run: |
@@ -372,11 +375,18 @@ jobs:
     needs: [detect-versions, build]
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          ls -laR artifacts/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
