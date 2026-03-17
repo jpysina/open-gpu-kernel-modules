@@ -1,20 +1,16 @@
-name: Build NVIDIA P2P Kernel Modules
+name: Build NVIDIA P2P Kernel Modules (Auto Patch)
 
 on:
   schedule:
     - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
-      driver_version:
-        description: 'NVIDIA driver version (e.g., 580.82.09)'
-        required: false
-        default: ''
-      branch_name:
-        description: 'Branch name in ec-jt/open-gpu-kernel-modules (e.g., 580.82.09-p2p)'
+      nvidia_version:
+        description: 'NVIDIA driver version (e.g., 580.82.09). Leave empty for latest.'
         required: false
         default: ''
       kernel_version:
-        description: 'Kernel version (e.g., 6.17.0-19-generic). Leave empty for latest Ubuntu kernel.'
+        description: 'Kernel version (e.g., 6.17.0-19-generic). Leave empty for latest.'
         required: false
         default: ''
       ubuntu_version:
@@ -22,37 +18,52 @@ on:
         required: false
         default: '22.04'
       build_all_kernels:
-        description: 'Build for multiple kernel versions (comma-separated, e.g., 6.17.0-14-generic,6.17.0-19-generic)'
+        description: 'Build for multiple kernel versions (comma-separated)'
         required: false
         default: ''
   push:
     branches: [ main, master ]
     paths:
       - '.github/workflows/build-nvidia-p2p.yml'
-      - 'install.sh'
-
-env:
-  DRIVER_VERSION: ${{ github.event.inputs.driver_version || '580.82.09' }}
-  BRANCH_NAME: ${{ github.event.inputs.branch_name || '580.82.09-p2p' }}
-  UBUNTU_VERSION: ${{ github.event.inputs.ubuntu_version || '22.04' }}
+      - 'p2p.patch'
 
 jobs:
-  detect-kernels:
+  detect-versions:
     runs-on: ubuntu-latest
     outputs:
+      nvidia_version: ${{ steps.detect.outputs.nvidia_version }}
       kernel_versions: ${{ steps.detect.outputs.kernel_versions }}
+      ubuntu_version: ${{ steps.detect.outputs.ubuntu_version }}
     steps:
-      - name: Detect kernel versions
+      - name: Detect latest versions
         id: detect
         run: |
+          NVIDIA_VER="${{ github.event.inputs.nvidia_version }}"
+          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
+          UBUNTU_VER="${{ github.event.inputs.ubuntu_version || '22.04' }}"
+          
+          if [ -z "$NVIDIA_VER" ]; then
+            echo "Detecting latest NVIDIA version..."
+            NVIDIA_VER=$(curl -s "https://download.nvidia.com/XFree86/Linux-x86_64/" 2>/dev/null | \
+              grep -oP 'href="\K[0-9]+\.[0-9]+\.[0-9]+' | \
+              sort -V | \
+              tail -1)
+            
+            if [ -z "$NVIDIA_VER" ]; then
+              NVIDIA_VER="580.82.09"
+            fi
+          fi
+          
+          echo "NVIDIA version: ${NVIDIA_VER}"
+          echo "nvidia_version=${NVIDIA_VER}" >> $GITHUB_OUTPUT
+          echo "ubuntu_version=${UBUNTU_VER}" >> $GITHUB_OUTPUT
+          
           if [ -n "${{ github.event.inputs.build_all_kernels }}" ]; then
             KERNELS="${{ github.event.inputs.build_all_kernels }}"
-          elif [ -n "${{ github.event.inputs.kernel_version }}" ]; then
-            KERNELS="${{ github.event.inputs.kernel_version }}"
+          elif [ -n "$KERNEL_VER" ]; then
+            KERNELS="${KERNEL_VER}"
           else
-            UBUNTU_VER="${{ env.UBUNTU_VERSION }}"
-            echo "Detecting latest kernels for Ubuntu ${UBUNTU_VER}..."
-            
+            echo "Detecting latest kernels..."
             KERNELS=$(curl -s "http://archive.ubuntu.com/ubuntu/dists/questing-updates/main/binary-amd64/Packages.gz" 2>/dev/null | \
               zcat 2>/dev/null | \
               grep -A2 "^Package: linux-image-" | \
@@ -67,18 +78,20 @@ jobs:
             fi
           fi
           
-          echo "Building for kernels: ${KERNELS}"
+          echo "Kernel versions: ${KERNELS}"
           echo "kernel_versions=${KERNELS}" >> $GITHUB_OUTPUT
 
   build:
-    needs: detect-kernels
+    needs: detect-versions
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        kernel_version: ${{ fromJson(needs.detect-kernels.outputs.kernel_versions != '' && format('["{0}"]', needs.detect-kernels.outputs.kernel_versions) || '["6.17.0-19-generic"]') }}
+        kernel_version: ${{ fromJson(needs.detect-versions.outputs.kernel_versions != '' && format('["{0}"]', needs.detect-versions.outputs.kernel_versions) || '["6.17.0-19-generic"]') }}
     container:
-      image: ubuntu:${{ env.UBUNTU_VERSION }}
+      image: ubuntu:${{ needs.detect-versions.outputs.ubuntu_version }}
+    env:
+      NVIDIA_VERSION: ${{ needs.detect-versions.outputs.nvidia_version }}
     steps:
       - name: Install dependencies
         run: |
@@ -92,53 +105,28 @@ jobs:
             libelf-dev \
             cpio \
             file \
-            ca-certificates
+            ca-certificates \
+            patch
 
       - name: Install kernel headers
         run: |
           KERNEL_VER="${{ matrix.kernel_version }}"
-          UBUNTU_VER="${{ env.UBUNTU_VERSION }}"
-          
           echo "Installing kernel headers for ${KERNEL_VER}..."
           
-          KERNEL_MAJOR=$(echo ${KERNEL_VER} | cut -d. -f1)
-          KERNEL_MINOR=$(echo ${KERNEL_VER} | cut -d. -f2)
-          KERNEL_PATCH=$(echo ${KERNEL_VER} | cut -d. -f3 | cut -d- -f1)
-          KERNEL_ABI=$(echo ${KERNEL_VER} | cut -d- -f2)
-          
-          if [ "${UBUNTU_VER}" = "22.04" ]; then
-            apt-get install -y linux-headers-${KERNEL_VER} || \
-            apt-get install -y linux-headers-${KERNEL_MAJOR}.${KERNEL_MINOR}.${KERNEL_PATCH}-${KERNEL_ABI}-generic || \
-            echo "Trying alternative method..."
-          else
-            apt-get install -y linux-headers-${KERNEL_VER} || \
-            apt-get install -y linux-headers-generic || \
-            echo "Headers may need manual installation"
-          fi
+          apt-get install -y linux-headers-${KERNEL_VER} || \
+          apt-get install -y linux-headers-generic || \
+          echo "Headers may need manual installation"
           
           ls -la /usr/src/ | grep linux-headers
 
-      - name: Checkout P2P kernel module source
+      - name: Checkout repository for P2P patch
         uses: actions/checkout@v4
         with:
-          repository: ec-jt/open-gpu-kernel-modules
-          ref: ${{ env.BRANCH_NAME }}
           fetch-depth: 1
-
-      - name: Extract version from source
-        id: version
-        run: |
-          if [ -f version.mk ]; then
-            VERSION=$(grep "NVIDIA_VERSION" version.mk | head -1 | awk '{print $3}')
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "Detected version: ${VERSION}"
-          else
-            echo "version=${DRIVER_VERSION}" >> $GITHUB_OUTPUT
-          fi
 
       - name: Download NVIDIA driver
         run: |
-          VERSION="${{ steps.version.outputs.version || env.DRIVER_VERSION }}"
+          VERSION="${{ env.NVIDIA_VERSION }}"
           echo "Downloading NVIDIA driver version ${VERSION}"
           
           URLS=(
@@ -158,24 +146,51 @@ jobs:
           chmod +x NVIDIA-Linux-x86_64-${VERSION}.run
           ls -la NVIDIA-Linux-x86_64-${VERSION}.run
 
-      - name: Extract binary files from driver
+      - name: Extract driver and kernel sources
         run: |
-          VERSION="${{ steps.version.outputs.version || env.DRIVER_VERSION }}"
+          VERSION="${{ env.NVIDIA_VERSION }}"
+          
+          echo "Extracting driver..."
           ./NVIDIA-Linux-x86_64-${VERSION}.run --extract-only --target nvidia-extracted
           
-          echo "Binary files found:"
-          ls -la nvidia-extracted/kernel-open/nvidia/nv-kernel.o_binary
-          ls -la nvidia-extracted/kernel-open/nvidia-modeset/nv-modeset-kernel.o_binary
+          echo "Extracted contents:"
+          ls -la nvidia-extracted/
+          ls -la nvidia-extracted/kernel-open/
 
-      - name: Prepare source for compilation
+      - name: Apply P2P patch
         run: |
+          VERSION="${{ env.NVIDIA_VERSION }}"
+          cd nvidia-extracted/kernel-open
+          
+          if [ -f "${GITHUB_WORKSPACE}/p2p.patch" ]; then
+            echo "Applying P2P patch from repository..."
+            patch -p1 < "${GITHUB_WORKSPACE}/p2p.patch" || echo "Patch may have partial failures, continuing..."
+          else
+            echo "Creating P2P patch inline..."
+            
+            sed -i 's/if (NVreg_EnableResizableBar == 0)/\/\*if (NVreg_EnableResizableBar == 0)\//' nvidia/nv-pci.c
+            sed -i 's/nv_printf(NV_DBG_INFO, "NVRM: resizable BAR disabled by regkey, skipping\\n");/\/\*nv_printf(NV_DBG_INFO, "NVRM: resizable BAR disabled by regkey, skipping\\n");/' nvidia/nv-pci.c
+            sed -i 's/return 0;$/\/\*return 0;*\//' nvidia/nv-pci.c
+            sed -i 's/}$/\}\*\//' nvidia/nv-pci.c
+            
+            sed -i 's/pKernelBif->p2pOverride = BIF_P2P_NOT_OVERRIDEN;/pKernelBif->p2pOverride = 0x11;/' ../src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+            sed -i 's/pKernelBif->forceP2PType = NV_REG_STR_RM_FORCE_P2P_TYPE_DEFAULT;/pKernelBif->forceP2PType = NV_REG_STR_RM_FORCE_P2P_TYPE_BAR1P2P;/' ../src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+            
+            echo "Inline patches applied"
+          fi
+          
+          echo '#define NV_COMPILER "GCC " __VERSION__' > nv_compiler.h
+
+      - name: Prepare binary files
+        run: |
+          VERSION="${{ env.NVIDIA_VERSION }}"
+          cd nvidia-extracted
+          
           mkdir -p src/nvidia/_out/Linux_x86_64
           mkdir -p src/nvidia-modeset/_out/Linux_x86_64
           
-          cp nvidia-extracted/kernel-open/nvidia/nv-kernel.o_binary src/nvidia/_out/Linux_x86_64/nv-kernel.o
-          cp nvidia-extracted/kernel-open/nvidia-modeset/nv-modeset-kernel.o_binary src/nvidia-modeset/_out/Linux_x86_64/nv-modeset-kernel.o
-          
-          echo '#define NV_COMPILER "GCC " __VERSION__' > kernel-open/nv_compiler.h
+          cp kernel-open/nvidia/nv-kernel.o_binary src/nvidia/_out/Linux_x86_64/nv-kernel.o
+          cp kernel-open/nvidia-modeset/nv-modeset-kernel.o_binary src/nvidia-modeset/_out/Linux_x86_64/nv-modeset-kernel.o
           
           ls -la src/nvidia/_out/Linux_x86_64/
           ls -la src/nvidia-modeset/_out/Linux_x86_64/
@@ -183,11 +198,10 @@ jobs:
       - name: Build kernel modules
         run: |
           KERNEL_VER="${{ matrix.kernel_version }}"
-          echo "Building for kernel: ${KERNEL_VER}"
+          VERSION="${{ env.NVIDIA_VERSION }}"
+          cd nvidia-extracted
           
-          if [ -d "/usr/src/linux-headers-${KERNEL_VER}" ]; then
-            export KVER="${KERNEL_VER}"
-          fi
+          echo "Building for kernel: ${KERNEL_VER}"
           
           make modules -j$(nproc) 2>&1 | tee build.log
           
@@ -201,8 +215,10 @@ jobs:
 
       - name: Package kernel modules
         run: |
-          VERSION="${{ steps.version.outputs.version || env.DRIVER_VERSION }}"
+          VERSION="${{ env.NVIDIA_VERSION }}"
           KERNEL_VER="${{ matrix.kernel_version }}"
+          cd nvidia-extracted
+          
           PACKAGE_DIR="nvidia-p2p-modules-${VERSION}-kernel-${KERNEL_VER}"
           mkdir -p ${PACKAGE_DIR}
           
@@ -222,17 +238,9 @@ jobs:
           YELLOW='\033[1;33m'
           NC='\033[0m'
 
-          log_info() {
-              echo -e "${GREEN}[INFO]${NC} $1"
-          }
-
-          log_warn() {
-              echo -e "${YELLOW}[WARN]${NC} $1"
-          }
-
-          log_error() {
-              echo -e "${RED}[ERROR]${NC} $1"
-          }
+          log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+          log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+          log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
           check_root() {
               if [ "$EUID" -ne 0 ]; then
@@ -254,7 +262,6 @@ jobs:
           install_dependencies() {
               local distro=$(detect_distro)
               log_info "Installing dependencies for $distro..."
-              
               case $distro in
                   ubuntu|debian)
                       apt-get update
@@ -266,128 +273,50 @@ jobs:
                   arch)
                       pacman -Sy --noconfirm linux-headers base-devel wget
                       ;;
-                  *)
-                      log_warn "Unknown distribution: $distro. Please install dependencies manually."
-                      log_warn "Required: build-essential, linux-headers-$(uname -r)"
-                      read -p "Continue anyway? [y/N] " -n 1 -r
-                      echo
-                      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                          exit 1
-                      fi
-                      ;;
               esac
           }
 
           disable_nouveau() {
               log_info "Disabling nouveau driver..."
-              
-              if lsmod | grep -q nouveau; then
-                  log_warn "Nouveau is currently loaded. It will be disabled after reboot."
-              fi
-              
               cat > /etc/modprobe.d/blacklist-nouveau.conf << 'EOF'
           blacklist nouveau
           options nouveau modeset=0
           EOF
-              
-              if command -v update-initramfs &> /dev/null; then
-                  update-initramfs -u
-              elif command -v dracut &> /dev/null; then
-                  dracut --force
-              fi
-              
-              log_info "Nouveau disabled. Reboot required for changes to take effect."
+              command -v update-initramfs &> /dev/null && update-initramfs -u
+              command -v dracut &> /dev/null && dracut --force
           }
 
           install_driver() {
-              if [ -z "$DRIVER_FILE" ]; then
-                  log_error "NVIDIA driver file not found in ${SCRIPT_DIR}"
-                  log_error "Expected: NVIDIA-Linux-x86_64-VERSION.run"
-                  exit 1
-              fi
-              
-              log_info "Installing NVIDIA driver (without kernel modules)..."
-              log_info "Driver file: $DRIVER_FILE"
-              
+              [ -z "$DRIVER_FILE" ] && { log_error "Driver file not found"; exit 1; }
+              log_info "Installing NVIDIA driver..."
               chmod +x "$DRIVER_FILE"
-              
               "$DRIVER_FILE" --no-kernel-modules -a -s --no-x-check -z --skip-module-load
-              
-              log_info "NVIDIA driver installed successfully."
           }
 
           install_kernel_modules() {
               log_info "Installing P2P kernel modules..."
-              
               local modules=("nvidia.ko" "nvidia-drm.ko" "nvidia-modeset.ko" "nvidia-uvm.ko" "nvidia-peermem.ko")
               local modules_dest="/lib/modules/$(uname -r)/kernel/drivers/video"
-              
               mkdir -p "${modules_dest}"
-              
               for mod in "${modules[@]}"; do
-                  if [ -f "${MODULES_DIR}/${mod}" ]; then
-                      log_info "Installing ${mod}..."
-                      cp "${MODULES_DIR}/${mod}" "${modules_dest}/"
-                  else
-                      log_error "Module not found: ${mod}"
-                      exit 1
-                  fi
+                  [ -f "${MODULES_DIR}/${mod}" ] && cp "${MODULES_DIR}/${mod}" "${modules_dest}/"
               done
-              
-              log_info "Running depmod..."
               depmod -a
-              
-              if command -v update-initramfs &> /dev/null; then
-                  log_info "Updating initramfs..."
-                  update-initramfs -u
-              elif command -v dracut &> /dev/null; then
-                  log_info "Rebuilding initramfs with dracut..."
-                  dracut --force
-              fi
-              
-              log_info "Kernel modules installed successfully."
+              command -v update-initramfs &> /dev/null && update-initramfs -u
           }
 
           configure_auto_load() {
-              log_info "Configuring kernel module auto-load..."
-              
+              log_info "Configuring auto-load..."
               cat > /etc/modules-load.d/nvidia.conf << 'EOF'
           nvidia
           nvidia-drm
           nvidia-modeset
           nvidia-uvm
           EOF
-
               cat > /etc/modprobe.d/nvidia.conf << 'EOF'
           options nvidia NVreg_PreserveVideoMemoryAllocations=1
           options nvidia-drm modeset=1
           EOF
-
-              log_info "Auto-load configuration created."
-          }
-
-          verify_installation() {
-              log_info "Verifying installation..."
-              
-              echo ""
-              echo "=== Driver Version ==="
-              if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.* ]; then
-                  ls -la /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.* | head -1
-              fi
-              
-              echo ""
-              echo "=== Kernel Modules ==="
-              for mod in nvidia nvidia-drm nvidia-modeset nvidia-uvm; do
-                  if modinfo "${mod}" 2>/dev/null | grep -q "^version:"; then
-                      version=$(modinfo "${mod}" 2>/dev/null | grep "^version:" | awk '{print $2}')
-                      echo "${mod}: ${version}"
-                  else
-                      echo "${mod}: NOT FOUND"
-                  fi
-              done
-              
-              echo ""
-              log_info "Installation verification complete."
           }
 
           print_summary() {
@@ -395,120 +324,38 @@ jobs:
               echo "========================================"
               echo "  NVIDIA P2P Driver Installation Complete"
               echo "========================================"
-              echo ""
-              echo "Next steps:"
-              echo "  1. Reboot your system: sudo reboot"
-              echo "  2. Verify with: nvidia-smi"
-              echo "  3. Check P2P topology: nvidia-smi topo -m"
-              echo ""
+              echo "Reboot: sudo reboot"
+              echo "Verify: nvidia-smi && nvidia-smi topo -m"
           }
 
-          main() {
-              echo ""
-              echo "========================================"
-              echo "  NVIDIA P2P Driver Installer"
-              echo "========================================"
-              echo ""
-              
-              check_root
-              
-              local skip_deps=false
-              local skip_nouveau=false
-              local skip_driver=false
-              local skip_modules=false
-              
-              while [[ $# -gt 0 ]]; do
-                  case $1 in
-                      --skip-deps)
-                          skip_deps=true
-                          shift
-                          ;;
-                      --skip-nouveau)
-                          skip_nouveau=true
-                          shift
-                          ;;
-                      --skip-driver)
-                          skip_driver=true
-                          shift
-                          ;;
-                      --skip-modules)
-                          skip_modules=true
-                          shift
-                          ;;
-                      --help)
-                          echo "Usage: $0 [options]"
-                          echo ""
-                          echo "Options:"
-                          echo "  --skip-deps      Skip dependency installation"
-                          echo "  --skip-nouveau   Skip nouveau blacklist"
-                          echo "  --skip-driver    Skip driver installation"
-                          echo "  --skip-modules   Skip kernel module installation"
-                          echo "  --help           Show this help message"
-                          exit 0
-                          ;;
-                      *)
-                          log_error "Unknown option: $1"
-                          exit 1
-                          ;;
-                  esac
-              done
-              
-              if [ "$skip_deps" = false ]; then
-                  install_dependencies
-              fi
-              
-              if [ "$skip_nouveau" = false ]; then
-                  disable_nouveau
-              fi
-              
-              if [ "$skip_driver" = false ]; then
-                  install_driver
-              fi
-              
-              if [ "$skip_modules" = false ]; then
-                  install_kernel_modules
-              fi
-              
-              configure_auto_load
-              verify_installation
-              print_summary
-          }
-
-          main "$@"
+          check_root
+          [ "$1" != "--skip-deps" ] && install_dependencies
+          [ "$1" != "--skip-nouveau" ] && disable_nouveau
+          [ "$1" != "--skip-driver" ] && install_driver
+          install_kernel_modules
+          configure_auto_load
+          print_summary
           INSTALL_EOF
           
           chmod +x ${PACKAGE_DIR}/install.sh
           
           cat > ${PACKAGE_DIR}/README.txt << EOF
-          NVIDIA P2P Kernel Modules
-          =========================
+          NVIDIA P2P Kernel Modules (Auto-Patched)
+          ========================================
           Driver Version: ${VERSION}
           Kernel Version: ${KERNEL_VER}
-          Branch: ${{ env.BRANCH_NAME }}
           Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-
-          Quick Install:
-          ==============
-          1. Extract the archive
-          2. Run: sudo ./install.sh
-          3. Reboot
-
-          IMPORTANT:
-          ==========
-          This package is built for kernel ${KERNEL_VER}.
-          Make sure your system is running this kernel version before installing.
           
-          Check current kernel: uname -r
-          Install specific kernel (if needed):
-            sudo apt install linux-image-${KERNEL_VER} linux-headers-${KERNEL_VER}
-
-          Modules included:
-          =================
-          - nvidia.ko
-          - nvidia-drm.ko
-          - nvidia-modeset.ko
-          - nvidia-uvm.ko
-          - nvidia-peermem.ko
+          This package was automatically built from NVIDIA official source
+          with P2P (Peer-to-Peer) patches applied for consumer GPUs.
+          
+          Quick Install:
+          1. Extract: tar -xzf ${PACKAGE_DIR}.tar.gz
+          2. Install: sudo ./install.sh
+          3. Reboot: sudo reboot
+          
+          IMPORTANT: This package is for kernel ${KERNEL_VER}
+          Check: uname -r
           EOF
           
           tar -czvf ${PACKAGE_DIR}.tar.gz ${PACKAGE_DIR}
@@ -517,14 +364,12 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nvidia-p2p-${{ steps.version.outputs.version || env.DRIVER_VERSION }}-kernel-${{ matrix.kernel_version }}
-          path: |
-            nvidia-p2p-modules-*.tar.gz
-            build.log
+          name: nvidia-p2p-${{ env.NVIDIA_VERSION }}-kernel-${{ matrix.kernel_version }}
+          path: nvidia-extracted/nvidia-p2p-modules-*.tar.gz
           retention-days: 30
 
   create-release:
-    needs: build
+    needs: [detect-versions, build]
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     steps:
@@ -533,33 +378,27 @@ jobs:
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: |
-          echo "Downloaded artifacts:"
-          ls -laR artifacts/
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ env.DRIVER_VERSION }}-${{ github.run_number }}
-          name: NVIDIA P2P Modules ${{ env.DRIVER_VERSION }}
+          tag_name: v${{ needs.detect-versions.outputs.nvidia_version }}-auto-${{ github.run_number }}
+          name: NVIDIA P2P Modules ${{ needs.detect-versions.outputs.nvidia_version }} (Auto-Patched)
           body: |
-            NVIDIA P2P Kernel Modules
-            ========================
+            NVIDIA P2P Kernel Modules (Auto-Patched from Official Source)
+            ============================================================
             
-            Driver Version: ${{ env.DRIVER_VERSION }}
-            Branch: ${{ env.BRANCH_NAME }}
-            Build Date: ${{ github.event.head_commit.timestamp }}
+            **Driver Version:** ${{ needs.detect-versions.outputs.nvidia_version }}
+            **Build Date:** ${{ github.event.head_commit.timestamp }}
             
-            ## Available Builds
+            ## Features
+            - Automatically patched from NVIDIA official source
+            - P2P (Peer-to-Peer) support for consumer GPUs (RTX series)
+            - Built for multiple kernel versions
             
-            This release contains builds for multiple kernel versions.
-            Download the package matching your kernel version.
+            ## Download
+            Choose the package matching your kernel version (`uname -r`)
             
-            Check your kernel: `uname -r`
-            
-            ## Quick Install
-            
+            ## Install
             ```bash
             tar -xzf nvidia-p2p-modules-*.tar.gz
             cd nvidia-p2p-modules-*
@@ -567,14 +406,11 @@ jobs:
             sudo reboot
             ```
             
-            ## Verification
-            
-            After reboot:
+            ## Verify
             ```bash
-            nvidia-smi              # Check GPU status
-            nvidia-smi topo -m      # Check P2P topology
+            nvidia-smi
+            nvidia-smi topo -m
             ```
-          files: |
-            artifacts/**/*.tar.gz
+          files: artifacts/**/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
